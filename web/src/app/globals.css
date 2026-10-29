@@ -1,0 +1,217 @@
+@import "tailwindcss";
+@import "tw-animate-css";
+@import "shadcn/tailwind.css";
+@import "maplibre-gl/dist/maplibre-gl.css";
+
+@custom-variant dark (&:is(.dark *));
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-destructive: var(--destructive);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+  --color-chart-1: var(--chart-1);
+  --color-chart-2: var(--chart-2);
+  --color-chart-3: var(--chart-3);
+  --color-chart-4: var(--chart-4);
+  --color-chart-5: var(--chart-5);
+  --color-warn: var(--warn);
+  --color-danger: var(--danger);
+  --color-sand: var(--sand);
+  --color-map: var(--map);
+
+  --font-sans: var(--font-geist);
+  --font-mono: var(--font-geist-mono);
+  --font-heading: var(--font-geist);
+  --font-display: var(--font-poppins);
+  --font-body: var(--font-inter);
+
+  --radius-sm: calc(var(--radius) * 0.6);
+  --radius-md: calc(var(--radius) * 0.8);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) * 1.4);
+  --radius-2xl: calc(var(--radius) * 1.8);
+  --radius-3xl: calc(var(--radius) * 2.2);
+  --radius-4xl: calc(var(--radius) * 2.6);
+}
+
+/* Climate Internet palette — warm paper, ink, and a deep forest green.
+   Hex values are mirrored in `HEALTH_HEX` (geo-mesh-map.tsx) for map layers. */
+:root {
+  --background: #f7f6f2;
+  --foreground: #14201b;
+  --card: #ffffff;
+  --card-foreground: #14201b;
+  --popover: #ffffff;
+  --popover-foreground: #14201b;
+  --primary: #0d9468;
+  --primary-foreground: #ffffff;
+  --secondary: #efede7;
+  --secondary-foreground: #14201b;
+  --muted: #f0eee9;
+  --muted-foreground: #66706b;
+  --accent: #e3f3ec;
+  --accent-foreground: #0b5c42;
+  --destructive: #e0484d;
+  --border: #e4e1da;
+  --input: #dedbd3;
+  --ring: #0d9468;
+  --warn: #d98a1c;
+  --danger: #e0484d;
+  --sand: #f1ede4;
+  --map: #eef0ec;
+  --chart-1: #0d9468;
+  --chart-2: #3b82c4;
+  --chart-3: #d98a1c;
+  --chart-4: #e0484d;
+  --chart-5: #66706b;
+  --radius: 0.75rem;
+}
+
+@layer base {
+  * {
+    @apply border-border outline-ring/50;
+  }
+  html {
+    @apply font-sans;
+  }
+  body {
+    @apply bg-background text-foreground;
+    font-feature-settings: "ss01", "cv11";
+  }
+  ::selection {
+    background: color-mix(in oklab, var(--primary) 22%, transparent);
+  }
+
+  /* Pointer cursor on everything clickable */
+  button:not(:disabled),
+  [role="button"],
+  [role="tab"],
+  a[href],
+  select,
+  summary,
+  label:has(input[type="checkbox"]),
+  label:has(input[type="radio"]) {
+    cursor: pointer;
+  }
+  button:disabled {
+    cursor: not-allowed;
+  }
+}
+
+@keyframes dash {
+  to {
+    stroke-dashoffset: -24;
+  }
+}
+.flow-dash {
+  stroke-dasharray: 6 6;
+  animation: dash 0.8s linear infinite;
+}
+
+/* Headlines emphasise with colour, not italics. */
+.font-display em {
+  font-style: normal;
+}
+
+/* ── Grainy mesh gradients ─────────────────────────────
+   Soft multi-stop radial gradients with a film-grain overlay. */
+.mesh {
+  position: relative;
+  isolation: isolate;
+  overflow: hidden;
+  background-color: var(--mesh-base, #eaf5ef);
+  background-image:
+    radial-gradient(40% 55% at var(--mx1, 18%) var(--my1, 22%), var(--mesh-a) 0%, transparent 70%),
+    radial-gradient(45% 60% at var(--mx2, 82%) var(--my2, 30%), var(--mesh-b) 0%, transparent 72%),
+    radial-gradient(55% 60% at var(--mx3, 60%) var(--my3, 90%), var(--mesh-c) 0%, transparent 70%),
+    radial-gradient(35% 45% at var(--mx4, 10%) var(--my4, 85%), var(--mesh-d, transparent) 0%, transparent 70%);
+  animation: mesh-drift 18s ease-in-out infinite alternate;
+}
+.mesh::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  pointer-events: none;
+  opacity: 0.38;
+  mix-blend-mode: overlay;
+  background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='220' height='220'><filter id='n'><feTurbulence type='fractalNoise' baseFrequency='.85' numOctaves='3' stitchTiles='stitch'/><feColorMatrix values='0 0 0 0 0  0 0 0 0 0  0 0 0 0 0  0 0 0 .9 0'/></filter><rect width='100%' height='100%' filter='url(%23n)'/></svg>");
+}
+.mesh > * {
+  position: relative;
+}
+@property --mx1 { syntax: "<percentage>"; inherits: false; initial-value: 18%; }
+@property --my1 { syntax: "<percentage>"; inherits: false; initial-value: 22%; }
+@property --mx2 { syntax: "<percentage>"; inherits: false; initial-value: 82%; }
+@property --my3 { syntax: "<percentage>"; inherits: false; initial-value: 90%; }
+@keyframes mesh-drift {
+  0% { --mx1: 18%; --my1: 22%; --mx2: 82%; --my3: 90%; }
+  50% { --mx1: 34%; --my1: 40%; --mx2: 64%; --my3: 70%; }
+  100% { --mx1: 22%; --my1: 62%; --mx2: 88%; --my3: 82%; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .mesh { animation: none; }
+}
+
+.mesh-forest { --mesh-base: #dff3e8; --mesh-a: #5fd3a0; --mesh-b: #b8ecd2; --mesh-c: #2fb586; --mesh-d: #e9f7c9; }
+.mesh-sky    { --mesh-base: #e6f0fa; --mesh-a: #7db7f0; --mesh-b: #f6e7c1; --mesh-c: #4d93e0; --mesh-d: #d6ecff; }
+.mesh-ember  { --mesh-base: #fdebdd; --mesh-a: #ffb27a; --mesh-b: #ffe0b0; --mesh-c: #f2774a; --mesh-d: #ffd2c2; }
+.mesh-sand   { --mesh-base: #f5efe1; --mesh-a: #f3dca2; --mesh-b: #cfe9dc; --mesh-c: #eac27a; --mesh-d: #fff6dc; }
+.mesh-ink    { --mesh-base: #0f1a16; --mesh-a: #1f6f53; --mesh-b: #12392c; --mesh-c: #0d9468; --mesh-d: #203a52; }
+
+/* Fine dot grid used behind product shots. */
+.dot-grid {
+  background-image: radial-gradient(circle at 1px 1px, color-mix(in oklab, var(--foreground) 14%, transparent) 1px, transparent 0);
+  background-size: 22px 22px;
+}
+
+/* ── MapLibre chrome, restyled to match the UI ─────── */
+.maplibregl-map {
+  font: inherit;
+}
+.maplibregl-ctrl-group {
+  border-radius: 12px !important;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  box-shadow: 0 6px 20px -8px rgb(20 32 27 / 0.25) !important;
+}
+.maplibregl-ctrl-attrib {
+  font-size: 10px;
+  border-radius: 8px !important;
+  background: rgb(255 255 255 / 0.75) !important;
+  backdrop-filter: blur(6px);
+}
+.maplibregl-marker {
+  will-change: transform;
+}
+
+@keyframes ping-soft {
+  0% { transform: scale(0.6); opacity: 0.55; }
+  100% { transform: scale(2.4); opacity: 0; }
+}
+.ping-soft {
+  animation: ping-soft 1.6s cubic-bezier(0.2, 0.7, 0.3, 1) infinite;
+}
+
+/* Let pages keep MapLibre controls clear of floating panels. */
+.maplibregl-ctrl-bottom-right {
+  right: var(--map-inset-right, 0px);
+}
+.maplibregl-ctrl-bottom-left {
+  left: var(--map-inset-left, 0px);
+}

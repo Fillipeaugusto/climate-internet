@@ -1,0 +1,56 @@
+Latin America is facing a growing climate challenge, extreme heat, long periods without
+rain, wildfires, intense rainfall, floods, and other extreme events.
+But there is another problem that receives less attention.
+Many of the places where the environmental data matters the most are rural or poorly connected.
+And a sensor can detect the problem.
+But if there is no reliable way to communicate that information, the warning may arrive too
+late for a solution.
+Once a wildfire starts, it can spread extremely quickly destroying vegetation and habitats
+while it relays in large, almost off-CU2, and other pollutants into the atmosphere.
+Our proposal is a climate internet, a low-cost distributed communication network designed
+for climate monitoring and environmental resilience.
+The network is built on a long-range, low-power radio technology such as LoRa or open mesh
+network ecosystems, instead of requiring every device to reach each other on the internet,
+we use NERBY nodes that can relay small packages of information from one point to another.
+A message can travel across the network until it reaches the gateway or a connected station
+or another person in the match.
+This makes the system especially useful in regions where cellular coverage is weak or
+expensive or unavailable in a situation of chaos.
+The physical network is only part of the solution, and for that we are not reinventing the radio.
+We use commercially available LoRa hardware from manufacturers like Rec Wireless or Realtek
+that already have solved the long radio communication.
+Our work is focused on the software, the platform that brings this network to life.
+It provides a visual layer where the user can register the nodes, locate them on the map,
+monitor their status and understand how the mesh is connected.
+The system can prioritize critical environment alerts and help identify alternatives to communication
+pathways when one node becomes unavailable.
+For our initial prototype, we simulate environmental data to demonstrate how an alert moves through
+the mesh from a remote node to the platform.
+But beyond the software, the point where we truly innovate is in the scalability model.
+Instead of scaling by developing more infrastructure ourselves, we scale through collaboration.
+We join the network as a registered collaborators.
+We call them environmental guardians.
+A school, a farmer, an NGO, or a municipality can each be added to the platform, a sentinel
+node, and configured with exactly the sensors their location needs.
+A school might monitor air quality, a farmer, a soil moisture, or a rainfall.
+Every node sensor sets its independence.
+The same infrastructure adapts to each collaborator's problem.
+And this benefits both sides, because on the one hand, the collaborators help authorities
+to make better decisions and faster environmental decisions.
+And on the other side, by joining the network, they are also gaining something for themselves.
+A resilient communication line on their own, Laura can carry basic text messages.
+Even when the cellular networks are down, so in an emergency, being part of the mesh isn't
+just a contribution, it's a safety net.
+Our goal is not to replace existing environmental monitoring systems, cellular networks, or public
+authorities.
+It's to add a resilient communication layer, where those systems do not reach, or when
+they stop working.
+Climate internet connects sensor, people, and environmental information, so that critical
+data can travel farther, earlier, and more reliably.
+Because climate resilience is not only about collecting data, it's about making sure the
+right information can reach the right people when it matters.
+The climate is changing, the way we connect environmental information needs to change too.
+One sensor can collect data, one node can transmit it, and a network can make it useful.
+Climate internet.
+Monitor, connect, and prevent.
+Thank you.
