@@ -2,7 +2,7 @@
 
 import type { GeoJSONSource, LngLatBoundsLike, Map as MLMap, Marker, StyleSpecification } from "maplibre-gl";
 import { RadioTower } from "lucide-react";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 import { health, lngLat, type Link, type MeshNode, type NodeHealth } from "@/lib/mesh";
 import { cn } from "@/lib/utils";
@@ -64,6 +64,12 @@ export type GeoMeshMapProps = {
   focus?: { id: string; n: number } | null;
   padding?: number | { top: number; bottom: number; left: number; right: number };
   compact?: boolean;
+  /** Extra markers drawn above the mesh, e.g. the viewer's position or community reports. */
+  overlays?: { id: string; lngLat: [number, number]; content: ReactNode }[];
+  /** Dashed line between two points, e.g. from the viewer to their nearest node. */
+  tether?: [[number, number], [number, number]] | null;
+  /** Bump `n` to fit the camera to these points instead of the whole mesh. */
+  fitTo?: { points: [number, number][]; n: number } | null;
   className?: string;
 };
 
@@ -100,7 +106,7 @@ function addMeshLayers(map: MLMap, dark: boolean) {
   const link = dark ? "#ffffff" : "#3c4a44";
   const deadLink = dark ? "#c9d1cd" : "#8a948f";
   const reach = dark ? "#5fd3a0" : PRIMARY;
-  for (const id of ["coverage", "links", "bcast", "route"]) {
+  for (const id of ["coverage", "links", "bcast", "route", "tether"]) {
     if (!map.getSource(id)) map.addSource(id, { type: "geojson", data: empty });
   }
   map.addLayer({ id: "coverage-fill", type: "fill", source: "coverage", paint: { "fill-color": reach, "fill-opacity": dark ? 0.14 : 0.07 } });
@@ -120,6 +126,7 @@ function addMeshLayers(map: MLMap, dark: boolean) {
   map.addLayer({ id: "bcast", type: "line", source: "bcast", layout: { "line-cap": "round" }, paint: { "line-color": reach, "line-width": 2.5, "line-opacity": 0.5 } });
   map.addLayer({ id: "route-glow", type: "line", source: "route", layout: { "line-cap": "round" }, paint: { "line-color": reach, "line-width": 14, "line-opacity": dark ? 0.35 : 0.22, "line-blur": 8 } });
   map.addLayer({ id: "route", type: "line", source: "route", layout: { "line-cap": "round", "line-join": "round" }, paint: { "line-color": reach, "line-width": 4 } });
+  map.addLayer({ id: "tether", type: "line", source: "tether", layout: { "line-cap": "round" }, paint: { "line-color": dark ? "#ffffff" : "#14201b", "line-width": 2, "line-dasharray": [1, 2] } });
 }
 
 function setData(map: MLMap, id: string, data: GeoJSON.FeatureCollection) {
@@ -143,19 +150,25 @@ export function GeoMeshMap({
   focus,
   padding = 60,
   compact,
+  overlays,
+  tether,
+  fitTo,
   className,
 }: GeoMeshMapProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const mapRef = useRef<MLMap | null>(null);
   const libRef = useRef<typeof import("maplibre-gl") | null>(null);
   const markers = useRef(new Map<string, Marker>());
+  const overlayMarkers = useRef(new Map<string, Marker>());
   const prevHops = useRef(0);
   // Latest props for the one-time async init, without re-running it.
-  const latest = useRef({ nodes, mapStyle, interactive, intro, padding, onIntroEnd });
+  const latest = useRef({ nodes, mapStyle, interactive, intro, padding, onIntroEnd, fitTo });
   useEffect(() => {
-    latest.current = { nodes, mapStyle, interactive, intro, padding, onIntroEnd };
+    latest.current = { nodes, mapStyle, interactive, intro, padding, onIntroEnd, fitTo };
   });
+  const [loaded, setLoaded] = useState(false);
   const [pins, setPins] = useState<Record<string, HTMLElement>>({});
+  const [overlayPins, setOverlayPins] = useState<Record<string, HTMLElement>>({});
   /** Bumps on every (re)loaded style so layers and data re-sync. */
   const [styleGen, setStyleGen] = useState(0);
 
@@ -163,6 +176,7 @@ export function GeoMeshMap({
     let cancelled = false;
     let map: MLMap | undefined;
     const markerMap = markers.current;
+    const overlayMap = overlayMarkers.current;
     import("maplibre-gl").then((ml) => {
       if (cancelled || !containerRef.current) return;
       const opts = latest.current;
@@ -190,7 +204,8 @@ export function GeoMeshMap({
         // Start with the attribution collapsed to its (i) button.
         map!.getContainer().querySelector(".maplibregl-compact-show")?.classList.remove("maplibregl-compact-show");
         // Padding may have changed (breakpoint) while the library was loading.
-        if (!latest.current.intro) map!.fitBounds(boundsOf(latest.current.nodes), { padding: latest.current.padding, duration: 0 });
+        if (!latest.current.intro && !latest.current.fitTo?.points.length) map!.fitBounds(boundsOf(latest.current.nodes), { padding: latest.current.padding, duration: 0 });
+        setLoaded(true);
       });
       if (opts.intro) {
         map.once("load", () => {
@@ -207,6 +222,7 @@ export function GeoMeshMap({
       map?.remove();
       mapRef.current = null;
       markerMap.clear();
+      overlayMap.clear();
     };
   }, []);
 
@@ -246,6 +262,39 @@ export function GeoMeshMap({
     }
     if (changed) setPins(Object.fromEntries([...markers.current].map(([id, m]) => [id, m.getElement()])));
   }, [nodes, styleGen]);
+
+  // Overlay markers, keyed by id like the node markers.
+  useEffect(() => {
+    const map = mapRef.current;
+    const ml = libRef.current;
+    if (!map || !ml || !styleGen) return;
+    let changed = false;
+    const seen = new Set<string>();
+    for (const o of overlays ?? []) {
+      seen.add(o.id);
+      const existing = overlayMarkers.current.get(o.id);
+      if (existing) existing.setLngLat(o.lngLat);
+      else {
+        const el = document.createElement("div");
+        overlayMarkers.current.set(o.id, new ml.Marker({ element: el, anchor: "center" }).setLngLat(o.lngLat).addTo(map));
+        changed = true;
+      }
+    }
+    for (const [id, m] of overlayMarkers.current) {
+      if (!seen.has(id)) {
+        m.remove();
+        overlayMarkers.current.delete(id);
+        changed = true;
+      }
+    }
+    if (changed) setOverlayPins(Object.fromEntries([...overlayMarkers.current].map(([id, m]) => [id, m.getElement()])));
+  }, [overlays, styleGen]);
+
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map || !styleGen) return;
+    setData(map, "tether", collection(tether ? [segment(tether[0], tether[1])] : []));
+  }, [tether, styleGen]);
 
   // Links, coverage and the alert route.
   useEffect(() => {
@@ -303,6 +352,21 @@ export function GeoMeshMap({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [focus?.n]);
 
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map || !loaded || !fitTo?.points.length) return;
+    const lngs = fitTo.points.map((p) => p[0]);
+    const lats = fitTo.points.map((p) => p[1]);
+    map.fitBounds(
+      [
+        [Math.min(...lngs), Math.min(...lats)],
+        [Math.max(...lngs), Math.max(...lats)],
+      ],
+      { padding, maxZoom: 12, duration: 900 },
+    );
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [fitTo?.n, loaded]);
+
   const head = route && hops > 0 ? route[Math.min(hops, route.length - 1)] : null;
 
   return (
@@ -318,6 +382,10 @@ export function GeoMeshMap({
           el,
           n.id,
         );
+      })}
+      {overlays?.map((o) => {
+        const el = overlayPins[o.id];
+        return el ? createPortal(o.content, el, o.id) : null;
       })}
     </div>
   );

@@ -2,20 +2,30 @@
 
 import {
   Activity,
+  BadgeCheck,
   BatteryFull,
   BatteryLow,
   BatteryWarning,
   BellRing,
   Building2,
   CircleDot,
+  CloudFog,
+  CloudLightning,
   CloudRain,
   Droplets,
+  Eye,
+  Flame,
   FlaskConical,
   Gauge,
   GraduationCap,
+  ImagePlus,
+  KeyRound,
   Layers,
   Leaf,
+  LoaderCircle,
+  LocateFixed,
   Map as MapIcon,
+  MapPin,
   Maximize2,
   MessageSquareText,
   Mountain,
@@ -31,7 +41,9 @@ import {
   Signal,
   Sprout,
   Thermometer,
+  ThermometerSun,
   Tractor,
+  TriangleAlert,
   UserPlus,
   Users,
   Waves,
@@ -50,23 +62,31 @@ import { Button } from "@/components/motion/button/base";
 import { Switch } from "@/components/motion/switch";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/motion/tabs";
 import {
+  bearing,
   clock,
+  condition,
   distanceKm,
   findRoute,
   fmt,
   fmtCoord,
+  formatCode,
   health,
   INITIAL_NODES,
   LINKS,
   lngLat,
+  mapUnits,
+  MESH_RANGE_KM,
+  nearestNodes,
   neighbors,
   reading,
+  SENSOR_CODES,
   SENSOR_ORDER,
   SENSORS,
   type GuardianType,
   type Link,
   type MeshNode,
   type SensorKey,
+  type Tone,
 } from "@/lib/mesh";
 import { cn } from "@/lib/utils";
 
@@ -95,8 +115,53 @@ const HEALTH_TEXT = { ok: "text-primary", low: "text-warn", critical: "text-dang
 const HEALTH_BG = { ok: "bg-primary", low: "bg-warn", critical: "bg-danger", offline: "bg-muted-foreground/40" };
 const HEALTH_LABEL = { ok: "Healthy", low: "Low battery", critical: "Critical", offline: "Offline" };
 
+const TONE_TEXT: Record<Tone, string> = { ok: "text-primary", warn: "text-warn", danger: "text-danger" };
+const TONE_BG: Record<Tone, string> = { ok: "bg-primary", warn: "bg-warn", danger: "bg-danger" };
+const TONE_RANK: Record<Tone, number> = { ok: 0, warn: 1, danger: 2 };
+
 type LogEntry = { id: number; time: string; text: string; tone?: "alert" | "ok" | "warn" };
 type Message = { id: number; from: string; text: string; time: string; hops: number | null; status: "sending" | "delivered" | "queued" };
+
+type Place = { lngLat: [number, number]; label: string };
+
+type ReportKind = "fire" | "smoke" | "flood" | "landslide" | "heat" | "wind" | "rain" | "storm";
+const REPORT_KINDS: Record<ReportKind, { label: string; icon: LucideIcon; tone: Tone }> = {
+  fire: { label: "Fire nearby", icon: Flame, tone: "danger" },
+  smoke: { label: "Heavy smoke", icon: CloudFog, tone: "warn" },
+  flood: { label: "Flooding", icon: Waves, tone: "danger" },
+  landslide: { label: "Landslide", icon: Mountain, tone: "danger" },
+  heat: { label: "Extreme heat", icon: ThermometerSun, tone: "warn" },
+  wind: { label: "Strong wind", icon: Wind, tone: "warn" },
+  rain: { label: "Heavy rain", icon: CloudRain, tone: "warn" },
+  storm: { label: "Lightning storm", icon: CloudLightning, tone: "warn" },
+};
+
+type Media = { url: string; kind: "image" | "video"; name: string };
+type Report = { id: number; name: string; kinds: ReportKind[]; note: string; media: Media[]; place: Place; via: string | null; km: number; time: string };
+
+const SEED_REPORTS: Report[] = [
+  {
+    id: 1,
+    name: "Community observer",
+    kinds: ["smoke"],
+    note: "Grey smoke rising behind the ridge, wind pushing it east.",
+    media: [],
+    place: { lngLat: [-47.995, -13.885], label: "Trail near the ranger post" },
+    via: "N-01",
+    km: 3.4,
+    time: "06:58:21",
+  },
+];
+
+/** Towns around the mesh, for picking a location without GPS or typing. */
+const QUICK_PLACES: Place[] = [
+  { lngLat: [-47.51, -14.1325], label: "Alto Paraíso" },
+  { lngLat: [-47.8167, -14.1739], label: "São Jorge" },
+  { lngLat: [-47.4583, -13.7975], label: "Cavalcante" },
+  { lngLat: [-48.075, -14.15], label: "Colinas do Sul" },
+];
+
+const worstOf = (tones: Tone[]) => tones.reduce<Tone>((w, t) => (TONE_RANK[t] > TONE_RANK[w] ? t : w), "ok");
 
 const seedOf = (id: string) => id.split("").reduce((a, c) => a + c.charCodeAt(0), 0);
 
@@ -143,6 +208,11 @@ export function Platform() {
     { id: 2, from: "N-02", text: "School evacuation drill complete. All students safe.", time: "08:15:03", hops: 3, status: "delivered" },
   ]);
   const [cellularDown, setCellularDown] = useState(true);
+
+  const [me, setMe] = useState<Place | null>(null);
+  const [reports, setReports] = useState<Report[]>(SEED_REPORTS);
+  const [usedCodes, setUsedCodes] = useState<string[]>([]);
+  const [fitTo, setFitTo] = useState<{ points: [number, number][]; n: number } | null>(null);
 
   const byId = useMemo(() => new Map(nodes.map((n) => [n.id, n])), [nodes]);
   const node = byId.get(selected) ?? nodes[0];
@@ -213,13 +283,10 @@ export function Platform() {
     });
   }
 
-  function registerGuardian(g: { name: string; type: GuardianType; location: string; sensors: SensorKey[] }) {
+  function registerGuardian(g: { name: string; type: GuardianType; location: string; sensors: SensorKey[]; place: Place; code: string }) {
     const id = `N-${String(nodes.filter((n) => !n.gateway).length + 1).padStart(2, "0")}`;
-    // Drop the new node in the emptiest area of the map, then link it to its two nearest neighbours.
-    const spots = [
-      { x: 620, y: 140 }, { x: 250, y: 300 }, { x: 560, y: 560 }, { x: 820, y: 330 }, { x: 260, y: 640 }, { x: 640, y: 30 },
-    ];
-    const spot = spots.find((s) => nodes.every((n) => Math.hypot(n.x - s.x, n.y - s.y) > 90)) ?? { x: 500, y: 200 };
+    // Place the node where the guardian installed it, then link it to its two nearest neighbours.
+    const spot = mapUnits(g.place.lngLat);
     const newNode: MeshNode = { id, ...spot, battery: 100, online: true, guardian: g.name, guardianType: g.type, location: g.location, sensors: g.sensors };
     const nearest = [...nodes]
       .filter((n) => !n.gateway)
@@ -228,7 +295,26 @@ export function Platform() {
     setNodes((ns) => [...ns.filter((n) => !n.gateway), newNode, ...ns.filter((n) => n.gateway)]);
     setLinks((ls) => [...ls, ...nearest.map((n) => ({ a: id, b: n.id, rssi: -88 - Math.round(Math.hypot(n.x - spot.x, n.y - spot.y) / 30) }))]);
     setSelected(id);
+    setUsedCodes((c) => [...c, g.code]);
     return id;
+  }
+
+  /** A sensor-less guardian's report: text goes over LoRa from the nearest node; media waits for internet. */
+  function submitReport(r: Omit<Report, "id" | "via" | "km" | "time">) {
+    const near = nearestNodes(r.place.lngLat, nodes)[0];
+    const via = near && near.km <= MESH_RANGE_KM ? near.node.id : null;
+    const report: Report = { ...r, id: Date.now(), via, km: near?.km ?? 0, time: clock() };
+    setReports((rs) => [report, ...rs]);
+    if (via) {
+      const what = r.kinds.map((k) => REPORT_KINDS[k].label).join(", ") || "Observation";
+      sendMessage(via, `Report · ${what} near ${r.place.label}${r.note ? ` — ${r.note}` : ""}`.slice(0, 160));
+    }
+    return report;
+  }
+
+  function showOnMap(points: [number, number][]) {
+    setFitTo((f) => ({ points, n: (f?.n ?? 0) + 1 }));
+    setTab("map");
   }
 
   function sendMessage(from: string, text: string) {
@@ -243,6 +329,49 @@ export function Platform() {
   const sensorNodes = nodes.filter((n) => !n.gateway);
   const online = sensorNodes.filter((n) => n.online).length;
   const done = route && hops >= route.length - 1 && !relaying;
+
+  const myNearest = me ? nearestNodes(me.lngLat, nodes)[0] : undefined;
+  const tether = useMemo<[[number, number], [number, number]] | null>(
+    () => (me && myNearest ? [me.lngLat, lngLat(myNearest.node)] : null),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [me, myNearest?.node.id, myNearest?.node.x, myNearest?.node.y],
+  );
+  const overlays = useMemo(
+    () => [
+      ...reports.map((r) => {
+        const tone = worstOf(r.kinds.map((k) => REPORT_KINDS[k].tone));
+        const Icon = r.kinds.length ? REPORT_KINDS[r.kinds[0]].icon : Eye;
+        return {
+          id: `report-${r.id}`,
+          lngLat: r.place.lngLat,
+          content: (
+            // Lifted above its point like a map pin, so it stays visible over the "you" marker and nodes.
+            <span title={`${r.kinds.map((k) => REPORT_KINDS[k].label).join(", ") || "Observation"} · ${r.place.label} · ${r.time}`} className="flex -translate-y-[18px] flex-col items-center">
+              <span className={cn("grid size-7 place-items-center rounded-full text-white shadow-lg ring-2 ring-white", TONE_BG[tone])}>
+                <Icon className="size-3.5" />
+              </span>
+              <span className={cn("-mt-0.5 h-2 w-0.5 rounded-full", TONE_BG[tone])} />
+            </span>
+          ),
+        };
+      }),
+      ...(me
+        ? [
+            {
+              id: "me",
+              lngLat: me.lngLat,
+              content: (
+                <span title={`You · ${me.label}`} className="relative grid place-items-center">
+                  <span className="ping-soft absolute size-8 rounded-full bg-sky-500/50" />
+                  <span className="relative size-4 rounded-full bg-sky-500 shadow-lg ring-[3px] ring-white" />
+                </span>
+              ),
+            },
+          ]
+        : []),
+    ],
+    [reports, me],
+  );
 
   return (
     <Tabs value={tab} onValueChange={setTab} variant="pill" className="flex min-h-dvh flex-col bg-background">
@@ -288,6 +417,9 @@ export function Platform() {
             coverage={coverage}
             fitKey={fitKey}
             focus={focus}
+            overlays={overlays}
+            tether={tether}
+            fitTo={fitTo}
             padding={wide ? { top: 70, bottom: 110, left: 350, right: 390 } : { top: 50, bottom: 90, left: 40, right: 40 }}
           />
 
@@ -400,11 +532,19 @@ export function Platform() {
       <TabsContent value="guardians" className="mt-0 flex-1 rounded-none">
         <Guardians
           nodes={sensorNodes}
+          allNodes={nodes}
+          tick={tick}
+          me={me}
+          onLocate={setMe}
+          usedCodes={usedCodes}
+          reports={reports}
           onRegister={(g) => registerGuardian(g)}
+          onReport={submitReport}
           onView={(id) => {
             select(id, true);
             setTab("map");
           }}
+          onShowOnMap={showOnMap}
         />
       </TabsContent>
 
@@ -688,27 +828,41 @@ function NodeProfile({
 const TYPES: GuardianType[] = ["School", "Farmer", "NGO", "Municipality", "Research"];
 const inputClass = "mt-1.5 h-10 w-full rounded-lg border border-input bg-background px-3 text-sm text-foreground outline-none transition-colors placeholder:text-muted-foreground/70 focus:border-foreground/40 focus:ring-4 focus:ring-foreground/5";
 
-function Guardians({ nodes, onRegister, onView }: { nodes: MeshNode[]; onRegister: (g: { name: string; type: GuardianType; location: string; sensors: SensorKey[] }) => string; onView: (id: string) => void }) {
-  const [name, setName] = useState("");
-  const [location, setLocation] = useState("");
-  const [type, setType] = useState<GuardianType>("School");
-  const [sensors, setSensors] = useState<SensorKey[]>(["temperature", "airQuality"]);
+type JoinMode = "sensor" | "observer";
+
+function Guardians({
+  nodes,
+  allNodes,
+  tick,
+  me,
+  onLocate,
+  usedCodes,
+  reports,
+  onRegister,
+  onReport,
+  onView,
+  onShowOnMap,
+}: {
+  nodes: MeshNode[];
+  allNodes: MeshNode[];
+  tick: number;
+  me: Place | null;
+  onLocate: (p: Place) => void;
+  usedCodes: string[];
+  reports: Report[];
+  onRegister: (g: { name: string; type: GuardianType; location: string; sensors: SensorKey[]; place: Place; code: string }) => string;
+  onReport: (r: Omit<Report, "id" | "via" | "km" | "time">) => Report;
+  onView: (id: string) => void;
+  onShowOnMap: (points: [number, number][]) => void;
+}) {
+  const [mode, setMode] = useState<JoinMode>("sensor");
   const [joined, setJoined] = useState<string | null>(null);
 
   const counts = TYPES.map((t) => ({ t, n: nodes.filter((x) => x.guardianType === t).length }));
 
-  function submit(e: React.FormEvent) {
-    e.preventDefault();
-    if (!name.trim() || sensors.length === 0) return;
-    const id = onRegister({ name: name.trim(), type, location: location.trim() || "Unspecified", sensors });
-    setJoined(id);
-    setName("");
-    setLocation("");
-  }
-
   return (
-    <div className="mx-auto grid max-w-6xl gap-6 px-4 py-8 lg:grid-cols-[1fr_380px]">
-      <div>
+    <div className="mx-auto grid max-w-6xl gap-6 px-4 py-8 lg:grid-cols-[1fr_400px]">
+      <div className="min-w-0">
         <SectionLabel>Environmental guardians</SectionLabel>
         <h2 className="mt-1 font-display text-3xl font-semibold tracking-[-0.03em]">Every node, its own collaborator.</h2>
         <div className="mt-6 grid grid-cols-2 gap-3 sm:grid-cols-5">
@@ -763,49 +917,515 @@ function Guardians({ nodes, onRegister, onView }: { nodes: MeshNode[]; onRegiste
             </tbody>
           </table>
         </div>
+        <ReportFeed reports={reports} onShowOnMap={onShowOnMap} />
       </div>
 
-      <form onSubmit={submit} className={cn(panel, "h-fit p-5")}>
-        <p className="flex items-center gap-2 font-semibold"><span className="grid size-8 place-items-center rounded-lg bg-foreground text-background"><UserPlus className="size-4" /></span>Register a guardian</p>
-        <ol className="mt-4 grid grid-cols-4 gap-1 text-center text-[10px] text-muted-foreground">
-          {["Register", "Assign node", "Sensors", "Join mesh"].map((s, i) => (
-            <li key={s} className="rounded-md bg-muted px-1 py-1.5"><span className="font-mono text-foreground">{i + 1}</span> {s}</li>
-          ))}
-        </ol>
-        <label className="mt-5 block text-xs font-medium text-muted-foreground">Organization name
-          <input value={name} onChange={(e) => setName(e.target.value)} required placeholder="e.g. Escola Municipal Aurora" className={inputClass} />
-        </label>
-        <label className="mt-3 block text-xs font-medium text-muted-foreground">Location
-          <input value={location} onChange={(e) => setLocation(e.target.value)} placeholder="e.g. North ridge" className={inputClass} />
-        </label>
-        <p className="mt-4 text-xs font-medium text-muted-foreground">Collaborator type</p>
-        <div className="mt-1.5 flex flex-wrap gap-1.5">
-          {TYPES.map((t) => (
-            <button type="button" key={t} onClick={() => setType(t)} className={cn("rounded-full border px-3 py-1 text-xs transition-colors", type === t ? "border-foreground bg-foreground text-background" : "border-border hover:border-foreground/30")}>{t}</button>
+      <div className={cn(panel, "h-fit p-5")}>
+        <p className="flex items-center gap-2 font-semibold"><span className="grid size-8 place-items-center rounded-lg bg-foreground text-background"><UserPlus className="size-4" /></span>Join the mesh</p>
+        <div className="mt-4 grid grid-cols-2 gap-1 rounded-xl bg-muted p-1" role="radiogroup" aria-label="How you join">
+          {([
+            { k: "sensor", label: "With sensor", icon: Radio },
+            { k: "observer", label: "Without sensor", icon: Eye },
+          ] as const).map(({ k, label, icon: Icon }) => (
+            <button
+              key={k}
+              type="button"
+              role="radio"
+              aria-checked={mode === k}
+              onClick={() => setMode(k)}
+              className={cn("flex h-9 items-center justify-center gap-1.5 rounded-lg text-xs font-medium transition-colors", mode === k ? "bg-card text-foreground shadow-sm ring-1 ring-border" : "text-muted-foreground hover:text-foreground")}
+            >
+              <Icon className="size-3.5" />{label}
+            </button>
           ))}
         </div>
-        <p className="mt-4 text-xs font-medium text-muted-foreground">Sensors for this location</p>
-        <div className="mt-1.5 grid grid-cols-2 gap-1.5">
-          {SENSOR_ORDER.map((k) => {
-            const on = sensors.includes(k);
-            const Icon = SENSOR_ICON[k];
-            return (
-              <button type="button" key={k} onClick={() => setSensors((s) => (on ? s.filter((x) => x !== k) : [...s, k]))} className={cn("flex items-center gap-2 rounded-lg border px-2.5 py-2 text-left text-xs transition-colors", on ? "border-primary/40 bg-accent text-accent-foreground" : "border-border text-muted-foreground hover:border-foreground/30")}>
-                <Icon className="size-3.5" />{SENSORS[k].label}
+        <p className="mt-2 text-xs text-muted-foreground">
+          {mode === "sensor"
+            ? "Activate the node you bought with the code from its box. It joins the mesh where you install it."
+            : "No hardware needed: see the conditions near you and report what you're seeing on the ground."}
+        </p>
+        {mode === "sensor" ? (
+          <SensorJoin allNodes={allNodes} me={me} onLocate={onLocate} usedCodes={usedCodes} joined={joined} onJoined={setJoined} onRegister={onRegister} onView={onView} />
+        ) : (
+          <ObserverReport allNodes={allNodes} tick={tick} me={me} onLocate={onLocate} onReport={onReport} onShowOnMap={onShowOnMap} />
+        )}
+      </div>
+    </div>
+  );
+}
+
+function Steps({ steps }: { steps: string[] }) {
+  return (
+    <ol className="mt-4 grid grid-cols-4 gap-1 text-center text-[10px] text-muted-foreground">
+      {steps.map((s, i) => (
+        <li key={s} className="rounded-md bg-muted px-1 py-1.5"><span className="font-mono text-foreground">{i + 1}</span> {s}</li>
+      ))}
+    </ol>
+  );
+}
+
+function SensorJoin({
+  allNodes,
+  me,
+  onLocate,
+  usedCodes,
+  joined,
+  onJoined,
+  onRegister,
+  onView,
+}: {
+  allNodes: MeshNode[];
+  me: Place | null;
+  onLocate: (p: Place) => void;
+  usedCodes: string[];
+  joined: string | null;
+  onJoined: (id: string) => void;
+  onRegister: (g: { name: string; type: GuardianType; location: string; sensors: SensorKey[]; place: Place; code: string }) => string;
+  onView: (id: string) => void;
+}) {
+  const [code, setCode] = useState("");
+  const [name, setName] = useState("");
+  const [site, setSite] = useState("");
+  const [type, setType] = useState<GuardianType>("School");
+
+  const kit = SENSOR_CODES[code];
+  const used = usedCodes.includes(code);
+  const complete = code.length === 12;
+  const codeState = !complete ? null : !kit ? "invalid" : used ? "used" : "valid";
+  const near = me ? nearestNodes(me.lngLat, allNodes)[0] : undefined;
+
+  function submit(e: React.FormEvent) {
+    e.preventDefault();
+    if (codeState !== "valid" || !name.trim() || !me) return;
+    const id = onRegister({ name: name.trim(), type, location: site.trim() || me.label, sensors: kit.sensors, place: me, code });
+    onJoined(id);
+    setCode("");
+    setName("");
+    setSite("");
+  }
+
+  return (
+    <form onSubmit={submit}>
+      <Steps steps={["Code", "Location", "Details", "Join mesh"]} />
+      <label className="mt-5 block text-xs font-medium text-muted-foreground">Activation code
+        <span className="relative block">
+          <KeyRound className="pointer-events-none absolute top-1/2 left-3 mt-[3px] size-3.5 -translate-y-1/2 text-muted-foreground" />
+          <input
+            value={code}
+            onChange={(e) => setCode(formatCode(e.target.value))}
+            required
+            placeholder="CI-XXXX-XXXX"
+            autoComplete="off"
+            spellCheck={false}
+            aria-invalid={codeState === "invalid" || codeState === "used"}
+            className={cn(inputClass, "pl-8 font-mono tracking-wider uppercase", (codeState === "invalid" || codeState === "used") && "border-danger/60")}
+          />
+        </span>
+      </label>
+      {codeState === "valid" ? (
+        <div className="mt-2 rounded-lg border border-primary/30 bg-accent px-3 py-2 text-xs text-accent-foreground">
+          <p className="flex items-center gap-1.5 font-medium"><BadgeCheck className="size-3.5" />Verified · {kit.kit}</p>
+          <div className="mt-1.5 flex flex-wrap gap-1">
+            {kit.sensors.map((k) => {
+              const Icon = SENSOR_ICON[k];
+              return <span key={k} className="flex items-center gap-1 rounded-full bg-card/80 px-2 py-0.5 text-[11px]"><Icon className="size-3" />{SENSORS[k].label}</span>;
+            })}
+          </div>
+        </div>
+      ) : codeState === "invalid" ? (
+        <p className="mt-1.5 text-xs text-danger">Code not recognised. Check the card inside your sensor&apos;s box.</p>
+      ) : codeState === "used" ? (
+        <p className="mt-1.5 text-xs text-danger">This code has already activated a node. Each code works once.</p>
+      ) : (
+        <p className="mt-1.5 text-[11px] text-muted-foreground">
+          Printed on the card inside the box. Each code activates one sensor and sets its instruments. Demo:{" "}
+          <button type="button" onClick={() => setCode("CI-4F7K-2QXM")} className="font-mono text-foreground underline underline-offset-2">CI-4F7K-2QXM</button>
+        </p>
+      )}
+
+      <div className="mt-4">
+        <LocationPicker value={me} onChange={onLocate} label="Where is the sensor installed?" />
+        {me && near && (
+          <p className="mt-2 flex items-center gap-1.5 text-[11px] text-muted-foreground">
+            <Activity className="size-3" />
+            {near.km <= MESH_RANGE_KM ? (
+              <>Will link to <span className="font-mono text-foreground">{near.node.id}</span> · {near.km.toFixed(1)} km {bearing(me.lngLat, lngLat(near.node))}</>
+            ) : (
+              <>{near.km.toFixed(0)} km from the nearest node — this starts a new stretch of the mesh.</>
+            )}
+          </p>
+        )}
+      </div>
+
+      <label className="mt-4 block text-xs font-medium text-muted-foreground">Organization name
+        <input value={name} onChange={(e) => setName(e.target.value)} required placeholder="e.g. Escola Municipal Aurora" className={inputClass} />
+      </label>
+      <label className="mt-3 block text-xs font-medium text-muted-foreground">Site description <span className="font-normal">(optional)</span>
+        <input value={site} onChange={(e) => setSite(e.target.value)} placeholder="e.g. School roof, north ridge" className={inputClass} />
+      </label>
+      <p className="mt-4 text-xs font-medium text-muted-foreground">Collaborator type</p>
+      <div className="mt-1.5 flex flex-wrap gap-1.5">
+        {TYPES.map((t) => (
+          <button type="button" key={t} onClick={() => setType(t)} className={cn("rounded-full border px-3 py-1 text-xs transition-colors", type === t ? "border-foreground bg-foreground text-background" : "border-border hover:border-foreground/30")}>{t}</button>
+        ))}
+      </div>
+      <Button type="submit" disabled={codeState !== "valid" || !name.trim() || !me} className="mt-5 h-10 w-full">Join the mesh</Button>
+      {codeState === "valid" && !me && <p className="mt-2 text-center text-[11px] text-muted-foreground">Set the sensor&apos;s location to continue.</p>}
+      <AnimatePresence>
+        {joined && (
+          <motion.p initial={{ opacity: 0, y: 6 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0 }} className="mt-3 rounded-lg bg-accent px-3 py-2 text-center text-xs text-accent-foreground">
+            <span className="font-mono font-semibold">{joined}</span> joined the mesh and linked to its nearest neighbours.{" "}
+            <button type="button" onClick={() => onView(joined)} className="font-medium underline underline-offset-2">View on map</button>
+          </motion.p>
+        )}
+      </AnimatePresence>
+    </form>
+  );
+}
+
+function ObserverReport({
+  allNodes,
+  tick,
+  me,
+  onLocate,
+  onReport,
+  onShowOnMap,
+}: {
+  allNodes: MeshNode[];
+  tick: number;
+  me: Place | null;
+  onLocate: (p: Place) => void;
+  onReport: (r: Omit<Report, "id" | "via" | "km" | "time">) => Report;
+  onShowOnMap: (points: [number, number][]) => void;
+}) {
+  const [name, setName] = useState("");
+  const [kinds, setKinds] = useState<ReportKind[]>([]);
+  const [note, setNote] = useState("");
+  const [media, setMedia] = useState<Media[]>([]);
+  const [sent, setSent] = useState<Report | null>(null);
+  const fileRef = useRef<HTMLInputElement>(null);
+
+  function addFiles(files: FileList | null) {
+    const picked = Array.from(files ?? [])
+      .filter((f) => f.type.startsWith("image/") || f.type.startsWith("video/"))
+      .map((f) => ({ url: URL.createObjectURL(f), kind: f.type.startsWith("video/") ? ("video" as const) : ("image" as const), name: f.name }));
+    setMedia((m) => [...m, ...picked].slice(0, 6));
+    if (fileRef.current) fileRef.current.value = "";
+  }
+
+  function removeMedia(url: string) {
+    URL.revokeObjectURL(url);
+    setMedia((m) => m.filter((x) => x.url !== url));
+  }
+
+  function submit(e: React.FormEvent) {
+    e.preventDefault();
+    if (!me || (!kinds.length && !note.trim())) return;
+    // The report now owns the media URLs, so they're not revoked here.
+    setSent(onReport({ name: name.trim() || "Community observer", kinds, note: note.trim(), media, place: me }));
+    setKinds([]);
+    setNote("");
+    setMedia([]);
+  }
+
+  return (
+    <form onSubmit={submit}>
+      <Steps steps={["Location", "Conditions", "Report", "Send"]} />
+      <div className="mt-5">
+        <LocationPicker value={me} onChange={onLocate} label="Where are you?" />
+      </div>
+      {me && <NearbyConditions point={me.lngLat} nodes={allNodes} tick={tick} />}
+
+      <p className="mt-5 text-xs font-medium text-muted-foreground">What&apos;s happening near you?</p>
+      <div className="mt-1.5 grid grid-cols-2 gap-1.5">
+        {(Object.keys(REPORT_KINDS) as ReportKind[]).map((k) => {
+          const { label, icon: Icon, tone } = REPORT_KINDS[k];
+          const on = kinds.includes(k);
+          return (
+            <button
+              type="button"
+              key={k}
+              aria-pressed={on}
+              onClick={() => setKinds((s) => (on ? s.filter((x) => x !== k) : [...s, k]))}
+              className={cn(
+                "flex items-center gap-2 rounded-lg border px-2.5 py-2 text-left text-xs transition-colors",
+                on ? (tone === "danger" ? "border-danger/50 bg-danger/10 text-danger" : "border-warn/50 bg-warn/10 text-warn") : "border-border text-muted-foreground hover:border-foreground/30",
+              )}
+            >
+              <Icon className="size-3.5 shrink-0" />{label}
+            </button>
+          );
+        })}
+      </div>
+
+      <label className="mt-3 block text-xs font-medium text-muted-foreground">Details <span className="font-normal">(optional)</span>
+        <textarea
+          value={note}
+          onChange={(e) => setNote(e.target.value.slice(0, 120))}
+          rows={2}
+          placeholder="e.g. Fire spreading toward the road, about 1 km north"
+          className={cn(inputClass, "h-auto resize-none py-2")}
+        />
+      </label>
+
+      <div className="mt-3">
+        <p className="text-xs font-medium text-muted-foreground">Photos or video <span className="font-normal">(optional)</span></p>
+        <div className="mt-1.5 grid grid-cols-4 gap-1.5">
+          {media.map((m) => (
+            <div key={m.url} className="relative aspect-square overflow-hidden rounded-lg bg-muted ring-1 ring-border">
+              {m.kind === "image" ? (
+                // eslint-disable-next-line @next/next/no-img-element
+                <img src={m.url} alt={m.name} className="h-full w-full object-cover" />
+              ) : (
+                <video src={m.url} muted playsInline className="h-full w-full object-cover" />
+              )}
+              <button type="button" onClick={() => removeMedia(m.url)} aria-label={`Remove ${m.name}`} className="absolute top-1 right-1 grid size-5 place-items-center rounded-full bg-foreground/80 text-background">
+                <X className="size-3" />
               </button>
+            </div>
+          ))}
+          {media.length < 6 && (
+            <button type="button" onClick={() => fileRef.current?.click()} className="grid aspect-square place-items-center rounded-lg border border-dashed border-border text-muted-foreground transition-colors hover:border-foreground/30 hover:text-foreground">
+              <span className="flex flex-col items-center gap-1 text-[10px]"><ImagePlus className="size-4" />Add</span>
+            </button>
+          )}
+        </div>
+        <input ref={fileRef} type="file" accept="image/*,video/*" capture="environment" multiple hidden onChange={(e) => addFiles(e.target.files)} />
+        <p className="mt-1.5 text-[11px] text-muted-foreground">The text goes out over LoRa right away; photos and videos upload once internet is back.</p>
+      </div>
+
+      <label className="mt-3 block text-xs font-medium text-muted-foreground">Your name <span className="font-normal">(optional)</span>
+        <input value={name} onChange={(e) => setName(e.target.value)} placeholder="Community observer" className={inputClass} />
+      </label>
+
+      <Button type="submit" disabled={!me || (!kinds.length && !note.trim())} className="mt-5 h-10 w-full"><Send className="size-3.5" />Send report</Button>
+      {!me && <p className="mt-2 text-center text-[11px] text-muted-foreground">Set your location to send a report.</p>}
+      <AnimatePresence>
+        {sent && (
+          <motion.p initial={{ opacity: 0, y: 6 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0 }} className="mt-3 rounded-lg bg-accent px-3 py-2 text-center text-xs text-accent-foreground">
+            {sent.via ? (
+              <>Report relayed via <span className="font-mono font-semibold">{sent.via}</span> to the community channel.</>
+            ) : (
+              <>You&apos;re outside mesh range — report sent over the internet.</>
+            )}{" "}
+            <button type="button" onClick={() => onShowOnMap([sent.place.lngLat])} className="font-medium underline underline-offset-2">View on map</button>
+          </motion.p>
+        )}
+      </AnimatePresence>
+    </form>
+  );
+}
+
+/** Where the person is: GPS, a typed address, or one of the towns around the mesh. */
+function LocationPicker({ value, onChange, label }: { value: Place | null; onChange: (p: Place) => void; label: string }) {
+  const [q, setQ] = useState("");
+  const [busy, setBusy] = useState<"gps" | "search" | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  // Only the latest request may set the place, so a slow GPS answer can't override a town picked meanwhile.
+  const request = useRef(0);
+
+  function pick(p: Place) {
+    request.current++;
+    setBusy(null);
+    setError(null);
+    onChange(p);
+  }
+
+  function locate() {
+    if (!navigator.geolocation) return setError("This browser can't share its location — search instead.");
+    const id = ++request.current;
+    setBusy("gps");
+    setError(null);
+    navigator.geolocation.getCurrentPosition(
+      (p) => {
+        if (id !== request.current) return;
+        onChange({ lngLat: [p.coords.longitude, p.coords.latitude], label: "My location" });
+        setBusy(null);
+      },
+      () => {
+        if (id !== request.current) return;
+        setError("Couldn't get your location. Allow access, or search for a place.");
+        setBusy(null);
+      },
+      { enableHighAccuracy: true, timeout: 10000 },
+    );
+  }
+
+  async function search() {
+    const query = q.trim();
+    if (!query) return;
+    const id = ++request.current;
+    setBusy("search");
+    setError(null);
+    try {
+      const res = await fetch(`https://nominatim.openstreetmap.org/search?format=jsonv2&limit=1&countrycodes=br&q=${encodeURIComponent(query)}`);
+      const [hit] = (await res.json()) as { lat: string; lon: string; display_name: string }[];
+      if (id !== request.current) return;
+      if (!hit) setError(`No place found for “${query}”.`);
+      else onChange({ lngLat: [Number(hit.lon), Number(hit.lat)], label: hit.display_name.split(",").slice(0, 2).join(",").trim() });
+    } catch {
+      if (id !== request.current) return;
+      setError("Search is unavailable offline — use GPS or pick a town.");
+    }
+    setBusy(null);
+  }
+
+  return (
+    <div>
+      <p className="text-xs font-medium text-muted-foreground">{label}</p>
+      <div className="mt-1.5 flex gap-1.5">
+        <Button type="button" size="sm" variant="secondary" onClick={locate} disabled={busy === "gps"} className="h-10 shrink-0 gap-1.5 px-3">
+          {busy === "gps" ? <LoaderCircle className="size-3.5 animate-spin" /> : <LocateFixed className="size-3.5" />}
+          Use my location
+        </Button>
+        <label className="flex h-10 min-w-0 flex-1 items-center gap-2 rounded-lg border border-input bg-background px-2.5 text-sm focus-within:border-foreground/30">
+          {busy === "search" ? <LoaderCircle className="size-3.5 shrink-0 animate-spin text-muted-foreground" /> : <Search className="size-3.5 shrink-0 text-muted-foreground" />}
+          <input
+            value={q}
+            onChange={(e) => setQ(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") {
+                e.preventDefault();
+                search();
+              }
+            }}
+            placeholder="Address or town"
+            aria-label="Search for a place"
+            className="min-w-0 flex-1 bg-transparent outline-none placeholder:text-muted-foreground"
+          />
+        </label>
+      </div>
+      <div className="mt-1.5 flex flex-wrap gap-1">
+        {QUICK_PLACES.map((p) => (
+          <button
+            type="button"
+            key={p.label}
+            onClick={() => pick(p)}
+            className={cn("rounded-full border px-2.5 py-0.5 text-[11px] transition-colors", value?.label === p.label ? "border-foreground bg-foreground text-background" : "border-border text-muted-foreground hover:border-foreground/30 hover:text-foreground")}
+          >
+            {p.label}
+          </button>
+        ))}
+      </div>
+      {error && <p className="mt-1.5 text-[11px] text-danger">{error}</p>}
+      {value && (
+        <p className="mt-2 flex items-center gap-1.5 rounded-lg bg-muted px-2.5 py-1.5 text-xs">
+          <MapPin className="size-3.5 shrink-0 text-sky-600" />
+          <span className="truncate font-medium">{value.label}</span>
+          <span className="ml-auto shrink-0 font-mono text-[10px] text-muted-foreground">{fmtCoord(value.lngLat)}</span>
+        </p>
+      )}
+    </div>
+  );
+}
+
+/** Live conditions at a point: each instrument read from the closest online node that carries it. */
+function NearbyConditions({ point, nodes, tick }: { point: [number, number]; nodes: MeshNode[]; tick: number }) {
+  const near = nearestNodes(point, nodes);
+  const first = near[0];
+  if (!first) return <p className="mt-3 rounded-lg bg-muted px-3 py-2 text-xs text-muted-foreground">No nodes are online right now.</p>;
+  const rows = SENSOR_ORDER.flatMap((k) => {
+    const src = near.find((x) => x.node.sensors.includes(k));
+    // Skip instruments only available far beyond the closest node — they wouldn't describe this spot.
+    if (!src || src.km > first.km + 20) return [];
+    const v = reading(k, tick, seedOf(src.node.id) + SENSOR_ORDER.indexOf(k));
+    return [{ k, v, src, c: condition(k, v) }];
+  });
+  const worst = worstOf(rows.map((r) => r.c.tone));
+  const far = first.km > MESH_RANGE_KM;
+  const GIcon = GUARDIAN_ICON[first.node.guardianType];
+
+  return (
+    <div className="mt-3 overflow-hidden rounded-xl border border-border">
+      <div className="flex items-center gap-2.5 bg-muted/60 px-3 py-2.5">
+        <span className="grid size-8 shrink-0 place-items-center rounded-lg bg-card ring-1 ring-border"><GIcon className="size-3.5" /></span>
+        <div className="min-w-0 flex-1">
+          <p className="text-[11px] text-muted-foreground">Nearest node · {first.km.toFixed(1)} km {bearing(point, lngLat(first.node))}</p>
+          <p className="truncate text-sm font-medium"><span className="font-mono">{first.node.id}</span> · {first.node.guardian}</p>
+        </div>
+        <span className={cn("flex shrink-0 items-center gap-1.5 rounded-full bg-card px-2 py-0.5 text-[11px] font-medium", TONE_TEXT[worst])}>
+          <span className={cn("size-1.5 rounded-full", TONE_BG[worst])} />
+          {worst === "ok" ? "All normal" : worst === "warn" ? "Watch out" : "Hazard"}
+        </span>
+      </div>
+      {far && (
+        <p className="flex gap-2 border-t border-border bg-warn/10 px-3 py-2 text-[11px] text-warn">
+          <TriangleAlert className="mt-px size-3.5 shrink-0" />
+          You&apos;re {first.km.toFixed(0)} km from the mesh, so these readings may not match where you are. A sensor here would close the gap.
+        </p>
+      )}
+      <ul className="divide-y divide-border">
+        {rows.map(({ k, v, src, c }) => {
+          const Icon = SENSOR_ICON[k];
+          return (
+            <li key={k} className="flex items-center gap-2 px-3 py-2 text-xs">
+              <Icon className="size-3.5 shrink-0 text-muted-foreground" />
+              <span className="min-w-0 flex-1">
+                <span className="block">{SENSORS[k].label}</span>
+                <span className="block font-mono text-[10px] text-muted-foreground">{src.node.id} · {src.km.toFixed(1)} km</span>
+              </span>
+              <span className="font-mono tabular-nums">{fmt(k, v)}</span>
+              <span className={cn("w-[92px] shrink-0 text-right text-[11px] font-medium", TONE_TEXT[c.tone])}>{c.label}</span>
+            </li>
+          );
+        })}
+      </ul>
+    </div>
+  );
+}
+
+function ReportFeed({ reports, onShowOnMap }: { reports: Report[]; onShowOnMap: (points: [number, number][]) => void }) {
+  return (
+    <div className={cn(panel, "mt-4 overflow-hidden shadow-none")}>
+      <div className="flex items-center justify-between border-b border-border px-4 py-3">
+        <p className="flex items-center gap-2 text-sm font-medium"><Eye className="size-4 text-muted-foreground" />Community reports</p>
+        <span className="font-mono text-xs text-muted-foreground">{reports.length}</span>
+      </div>
+      <ul className="divide-y divide-border">
+        <AnimatePresence initial={false}>
+          {reports.map((r) => {
+            const tone = worstOf(r.kinds.map((k) => REPORT_KINDS[k].tone));
+            return (
+              <motion.li key={r.id} initial={{ opacity: 0, y: -6 }} animate={{ opacity: 1, y: 0 }} className="flex gap-3 px-4 py-3">
+                <span className={cn("grid size-8 shrink-0 place-items-center rounded-full text-white", r.kinds.length ? TONE_BG[tone] : "bg-muted-foreground/60")}>
+                  {(() => {
+                    const Icon = r.kinds.length ? REPORT_KINDS[r.kinds[0]].icon : Eye;
+                    return <Icon className="size-3.5" />;
+                  })()}
+                </span>
+                <div className="min-w-0 flex-1">
+                  <div className="flex flex-wrap items-center gap-1">
+                    {r.kinds.map((k) => (
+                      <span key={k} className={cn("rounded-full px-2 py-0.5 text-[11px] font-medium", REPORT_KINDS[k].tone === "danger" ? "bg-danger/10 text-danger" : "bg-warn/10 text-warn")}>{REPORT_KINDS[k].label}</span>
+                    ))}
+                    {!r.kinds.length && <span className="rounded-full bg-muted px-2 py-0.5 text-[11px] font-medium">Observation</span>}
+                  </div>
+                  {r.note && <p className="mt-1 text-sm">{r.note}</p>}
+                  {r.media.length > 0 && (
+                    <div className="mt-2 flex gap-1.5">
+                      {r.media.map((m) => (
+                        <span key={m.url} className="relative size-16 overflow-hidden rounded-lg bg-muted ring-1 ring-border">
+                          {m.kind === "image" ? (
+                            // eslint-disable-next-line @next/next/no-img-element
+                            <img src={m.url} alt={m.name} className="h-full w-full object-cover" />
+                          ) : (
+                            <video src={m.url} controls muted playsInline className="h-full w-full object-cover" />
+                          )}
+                        </span>
+                      ))}
+                    </div>
+                  )}
+                  <p className="mt-1.5 flex flex-wrap items-center gap-x-1.5 font-mono text-[10px] text-muted-foreground">
+                    <span>{r.time}</span>·<span className="font-body">{r.name}</span>·<span className="font-body">{r.place.label}</span>·
+                    <span>{r.via ? `via ${r.via} · ${r.km.toFixed(1)} km` : "over internet"}</span>
+                    <button type="button" onClick={() => onShowOnMap([r.place.lngLat])} className="ml-1 font-body text-foreground underline underline-offset-2">Map</button>
+                  </p>
+                </div>
+              </motion.li>
             );
           })}
-        </div>
-        <Button type="submit" className="mt-5 h-10 w-full">Join the mesh</Button>
-        <AnimatePresence>
-          {joined && (
-            <motion.p initial={{ opacity: 0, y: 6 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0 }} className="mt-3 rounded-lg bg-accent px-3 py-2 text-center text-xs text-accent-foreground">
-              <span className="font-mono font-semibold">{joined}</span> joined the mesh and linked to its nearest neighbours.{" "}
-              <button type="button" onClick={() => onView(joined)} className="font-medium underline underline-offset-2">View on map</button>
-            </motion.p>
-          )}
         </AnimatePresence>
-      </form>
+      </ul>
     </div>
   );
 }

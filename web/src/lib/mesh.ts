@@ -56,6 +56,24 @@ export const INITIAL_NODES: MeshNode[] = [
   { id: "GW", x: 960, y: 590, battery: null, online: true, gateway: true, guardian: "Regional Gateway", guardianType: "Municipality", location: "City hall uplink", sensors: [] },
 ];
 
+/**
+ * Activation codes printed on the card inside each sensor box, as the shop's backend would issue them.
+ * A code can only be activated once and fixes which sensors the node carries.
+ */
+export const SENSOR_CODES: Record<string, { kit: string; sensors: SensorKey[] }> = {
+  "CI-4F7K-2QXM": { kit: "RAK 4-in-1 Solar Node · Fire kit", sensors: ["temperature", "humidity", "smoke"] },
+  "CI-8RTD-5WNA": { kit: "RAK 4-in-1 Solar Node · Farm kit", sensors: ["soilMoisture", "rainfall", "temperature"] },
+  "CI-3HPV-9LCE": { kit: "RAK 4-in-1 Solar Node · River kit", sensors: ["riverLevel", "rainfall"] },
+  "CI-6YBG-1ZUJ": { kit: "RAK 4-in-1 Solar Node · Air kit", sensors: ["airQuality", "smoke", "temperature"] },
+};
+
+/** Formats free typing as `CI-XXXX-XXXX`. */
+export function formatCode(raw: string) {
+  const body = raw.toUpperCase().replace(/[^A-Z0-9]/g, "").replace(/^CI/, "").slice(0, 8);
+  if (!body) return "";
+  return `CI-${body.slice(0, 4)}${body.length > 4 ? `-${body.slice(4)}` : ""}`;
+}
+
 export const LINKS: Link[] = [
   { a: "N-01", b: "N-02", rssi: -92 },
   { a: "N-01", b: "N-03", rssi: -88 },
@@ -134,15 +152,45 @@ export function lngLat(n: { x: number; y: number }): [number, number] {
   return [BBOX.west + (n.x / 1000) * (BBOX.east - BBOX.west), BBOX.north + (n.y / 700) * (BBOX.south - BBOX.north)];
 }
 
-/** Great-circle distance between two nodes, in km. */
-export function distanceKm(a: { x: number; y: number }, b: { x: number; y: number }) {
-  const [lng1, lat1] = lngLat(a);
-  const [lng2, lat2] = lngLat(b);
+/** Real coordinates → map units; the inverse of `lngLat`. */
+export function mapUnits([lng, lat]: [number, number]) {
+  return { x: ((lng - BBOX.west) / (BBOX.east - BBOX.west)) * 1000, y: ((lat - BBOX.north) / (BBOX.south - BBOX.north)) * 700 };
+}
+
+/** Beyond this, a point is treated as outside LoRa reach of the mesh. */
+export const MESH_RANGE_KM = 25;
+
+/** Great-circle distance between two [lng, lat] points, in km. */
+export function haversineKm([lng1, lat1]: [number, number], [lng2, lat2]: [number, number]) {
   const rad = Math.PI / 180;
   const h =
     Math.sin(((lat2 - lat1) * rad) / 2) ** 2 +
     Math.cos(lat1 * rad) * Math.cos(lat2 * rad) * Math.sin(((lng2 - lng1) * rad) / 2) ** 2;
   return 2 * 6371 * Math.asin(Math.sqrt(h));
+}
+
+/** Great-circle distance between two nodes, in km. */
+export function distanceKm(a: { x: number; y: number }, b: { x: number; y: number }) {
+  return haversineKm(lngLat(a), lngLat(b));
+}
+
+/** Online sensor nodes sorted by distance from a point, closest first. */
+export function nearestNodes(point: [number, number], nodes: MeshNode[]) {
+  return nodes
+    .filter((n) => !n.gateway && n.online)
+    .map((node) => ({ node, km: haversineKm(point, lngLat(node)) }))
+    .sort((a, b) => a.km - b.km);
+}
+
+const COMPASS = ["N", "NE", "E", "SE", "S", "SW", "W", "NW"];
+
+/** Compass direction from `from` towards `to`. */
+export function bearing([lng1, lat1]: [number, number], [lng2, lat2]: [number, number]) {
+  const rad = Math.PI / 180;
+  const y = Math.sin((lng2 - lng1) * rad) * Math.cos(lat2 * rad);
+  const x = Math.cos(lat1 * rad) * Math.sin(lat2 * rad) - Math.sin(lat1 * rad) * Math.cos(lat2 * rad) * Math.cos((lng2 - lng1) * rad);
+  const deg = (Math.atan2(y, x) / rad + 360) % 360;
+  return COMPASS[Math.round(deg / 45) % 8];
 }
 
 export function fmtCoord([lng, lat]: [number, number]) {
@@ -154,6 +202,28 @@ export function reading(key: SensorKey, t: number, seed: number) {
   const wave = Math.sin(t / 6 + seed) * 0.6 + Math.sin(t / 2.3 + seed * 3) * 0.25;
   const noise = (Math.sin(t * 12.9898 + seed * 78.233) * 43758.5453) % 1;
   return Math.max(0, s.base + s.spread * (wave + noise * 0.3));
+}
+
+export type Tone = "ok" | "warn" | "danger";
+
+/** Plain-language reading of a sensor value, for people rather than operators. */
+export function condition(key: SensorKey, v: number): { label: string; tone: Tone } {
+  switch (key) {
+    case "temperature":
+      return v >= 38 ? { label: "Extreme heat", tone: "danger" } : v >= 32 ? { label: "Hot", tone: "warn" } : v <= 12 ? { label: "Cold", tone: "warn" } : { label: "Comfortable", tone: "ok" };
+    case "humidity":
+      return v < 20 ? { label: "Critically dry", tone: "danger" } : v < 30 ? { label: "Very dry", tone: "warn" } : v < 40 ? { label: "Dry", tone: "warn" } : v <= 70 ? { label: "Comfortable", tone: "ok" } : { label: "Humid", tone: "ok" };
+    case "airQuality":
+      return v <= 50 ? { label: "Good", tone: "ok" } : v <= 100 ? { label: "Moderate", tone: "warn" } : { label: "Unhealthy", tone: "danger" };
+    case "smoke":
+      return v <= 25 ? { label: "Clear air", tone: "ok" } : v <= 50 ? { label: "Haze", tone: "warn" } : { label: "Heavy smoke", tone: "danger" };
+    case "riverLevel":
+      return v < 2.5 ? { label: "Normal", tone: "ok" } : v < 3.5 ? { label: "Rising", tone: "warn" } : { label: "Flood risk", tone: "danger" };
+    case "soilMoisture":
+      return v < 15 ? { label: "Very dry · fire risk", tone: "danger" } : v < 25 ? { label: "Dry", tone: "warn" } : { label: "Normal", tone: "ok" };
+    case "rainfall":
+      return v < 0.2 ? { label: "No rain", tone: "ok" } : v < 10 ? { label: "Light rain", tone: "ok" } : v < 40 ? { label: "Heavy rain", tone: "warn" } : { label: "Torrential", tone: "danger" };
+  }
 }
 
 export function fmt(key: SensorKey, v: number) {
